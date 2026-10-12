@@ -1,0 +1,14 @@
+__pycache__/
+cache/
+voices/
+*.onnx
+*.apk
+*.obb
+dist*/
+phone_backup*/
+apk_extracted/
+apk_build*/
+tts_out*/
+*.log
+*.keystore
+tmp/
