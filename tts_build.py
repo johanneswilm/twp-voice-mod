@@ -37,6 +37,9 @@ OGG_RE = re.compile(r'^([A-Z0-9]+)_(\d{5})\.ogg$')
 def clean_text(t):
     t = TAG_RE.sub(' ', t)
     t = STAR_RE.sub(' ', t)
+    # trademark/copyright glyphs glued to product names - piper reads them
+    # aloud ("Markenzeichen"); remove instead of spacing
+    t = re.sub(r'[™©®]', '', t)
     t = t.replace('\n', ' ').replace('\r', ' ')
     t = re.sub(r'\s+', ' ', t).strip()
     # drop strings that are pure punctuation
