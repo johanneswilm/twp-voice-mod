@@ -80,6 +80,19 @@ adb push dist_from_phone/main.*.obb \
     /storage/emulated/0/Android/obb/com.terribletoybox.thimbleweedparkandroid/
 ```
 
+## Piper voice quality notes (measured)
+
+Before casting, read **[VOICE-QUALITY.md](VOICE-QUALITY.md)** /
+`voice_quality.json` — measured pitch (f0) and intelligibility for every
+German/Spanish Piper voice we evaluated. Highlights:
+
+- **Avoid `de_DE-mls-medium`** for intelligibility-critical use: it garbles
+  ~half its sentences (ASR-verified), on all 236 speakers.
+- Several Spanish "male" voices sound female (`claude`, `mls_10246`,
+  `mls_9972` measure 176–199 Hz).
+- The best German female voices live in `thorsten_emotional-medium`
+  (speakers 1 and 2), not in the dedicated `-low` female voices.
+
 ## Extending to other languages
 
 The engine supports text languages `de es fr it ru`. To add e.g. Italian
