@@ -1,0 +1,220 @@
+{
+ "_comment": "Measured while casting 47 characters. f0 = median autocorrelation pitch of a fixed sentence. intelligibility = mean character similarity between faster-whisper (base) transcription and source text over 8 synthesized sentences. sounds_like corrects Piper metadata where the voice presents as another gender.",
+ "avoid": [
+  {
+   "model": "de_DE-mls-medium",
+   "lang": "de",
+   "reason": "garbles: ASR similarity 0.25-0.67 vs 0.86-1.00 baseline; intermittent stuttering/artifacts on a large fraction of sentences, all 236 speakers",
+   "evidence_clips": 10000
+  },
+  {
+   "model": "es_ES-carlfm-x_low",
+   "lang": "es",
+   "reason": "x_low quality tier, robotic"
+  },
+  {
+   "model": "de_DE-eva_k-x_low",
+   "lang": "de",
+   "reason": "x_low quality tier, robotic"
+  }
+ ],
+ "recommended": {
+  "de": {
+   "male": [
+    {
+     "model": "de_DE-thorsten-high",
+     "f0": 136.6,
+     "intelligibility": [
+      0.91,
+      0.97
+     ]
+    },
+    {
+     "model": "de_DE-thorsten-medium",
+     "f0": 128.2,
+     "intelligibility": [
+      0.86,
+      1.0
+     ]
+    },
+    {
+     "model": "de_DE-pavoque-low",
+     "f0": 127.8,
+     "intelligibility": [
+      0.86,
+      0.93
+     ]
+    },
+    {
+     "model": "de_DE-karlsson-low",
+     "f0": 97.7,
+     "intelligibility": [
+      0.9,
+      0.97
+     ],
+     "note": "very deep"
+    },
+    {
+     "model": "de_DE-thorsten_emotional-medium",
+     "speaker": 4,
+     "f0": 128.0,
+     "intelligibility": [
+      0.94
+     ]
+    },
+    {
+     "model": "de_DE-thorsten_emotional-medium",
+     "speaker": 3,
+     "f0": 147.3,
+     "intelligibility": [
+      0.91
+     ]
+    },
+    {
+     "model": "de_DE-thorsten_emotional-medium",
+     "speaker": 0,
+     "f0": 163.0,
+     "intelligibility": [
+      0.84
+     ]
+    },
+    {
+     "model": "de_DE-thorsten_emotional-medium",
+     "speaker": 5,
+     "f0": 140.4,
+     "intelligibility": [
+      0.81
+     ]
+    },
+    {
+     "model": "de_DE-thorsten_emotional-medium",
+     "speaker": 6,
+     "f0": 130.8,
+     "intelligibility": [
+      0.85
+     ]
+    }
+   ],
+   "female": [
+    {
+     "model": "de_DE-thorsten_emotional-medium",
+     "speaker": 2,
+     "f0": 171.3,
+     "intelligibility": [
+      0.96
+     ]
+    },
+    {
+     "model": "de_DE-thorsten_emotional-medium",
+     "speaker": 1,
+     "f0": 232.0,
+     "intelligibility": [
+      0.86
+     ]
+    },
+    {
+     "model": "de_DE-kerstin-low",
+     "f0": 173.4,
+     "intelligibility": [
+      0.83,
+      0.86
+     ]
+    },
+    {
+     "model": "de_DE-ramona-low",
+     "f0": 216.3,
+     "intelligibility": [
+      0.73,
+      0.8
+     ],
+     "note": "use sparingly"
+    },
+    {
+     "model": "de_DE-thorsten_emotional-medium",
+     "speaker": 7,
+     "f0": 169.2,
+     "intelligibility": [
+      0.73
+     ],
+     "note": "use sparingly"
+    }
+   ]
+  },
+  "es": {
+   "male": [
+    {
+     "model": "es_ES-davefx-medium",
+     "f0": 122.3,
+     "intelligibility": "not separately audited; used for 2000+ clips without complaints"
+    },
+    {
+     "model": "es_MX-ald-medium",
+     "f0": 157.7
+    },
+    {
+     "model": "es_ES-sharvard-medium",
+     "speaker": 0,
+     "f0": 123.5
+    }
+   ],
+   "female": [
+    {
+     "model": "es_AR-daniela-high",
+     "f0": 184.8
+    },
+    {
+     "model": "es_ES-sharvard-medium",
+     "speaker": 1,
+     "f0": 204.2
+    },
+    {
+     "model": "es_MX-claude-high",
+     "f0": 176.0,
+     "note": "advertised male, sounds female"
+    },
+    {
+     "model": "es_ES-mls_10246-low",
+     "f0": 199.2,
+     "note": "advertised male, sounds female"
+    },
+    {
+     "model": "es_ES-mls_9972-low",
+     "f0": 181.5,
+     "note": "advertised male, sounds female"
+    }
+   ]
+  }
+ },
+ "gender_mismatch_warnings": [
+  {
+   "model": "es_MX-claude-high",
+   "advertised": "male",
+   "sounds": "female",
+   "f0": 176.0
+  },
+  {
+   "model": "es_ES-mls_10246-low",
+   "advertised": "male",
+   "sounds": "female",
+   "f0": 199.2
+  },
+  {
+   "model": "es_ES-mls_9972-low",
+   "advertised": "male",
+   "sounds": "female",
+   "f0": 181.5
+  }
+ ],
+ "pitch_shift_guidelines": {
+  "tool": "ffmpeg -af rubberband=pitch=X (duration-preserving)",
+  "natural_range_male": [
+   95,
+   155
+  ],
+  "natural_range_female": [
+   176,
+   255
+  ],
+  "max_recommended_shift": "±12% for natural results; beyond ~20% sounds artificial"
+ }
+}
