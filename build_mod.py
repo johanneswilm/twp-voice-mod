@@ -74,6 +74,10 @@ def repack_apk(apk_path, patched_lib_path, obb_path, out_apk):
     shutil.copyfile(patched_lib_path, f'{build}/lib/arm64-v8a/libThimbleweedPark.so')
     if obb_path is not None:
         shutil.copyfile(obb_path, f'{build}/assets/obb')
+    # optional wrapper dex with the assets/obb -> external OBB self-extraction hook
+    wrapper_dex = '/tmp/classes_patched.dex'
+    if os.path.exists(wrapper_dex):
+        shutil.copyfile(wrapper_dex, f'{build}/classes.dex')
     unsigned = out_apk + '.unsigned'
     with zipfile.ZipFile(unsigned, 'w') as z:
         for root, dirs, files in os.walk(build):
