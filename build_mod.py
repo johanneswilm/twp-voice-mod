@@ -58,10 +58,14 @@ def patch_lib(apk_path, out_path):
         print('lib differs from known build -> auto-patching this build')
         open('/tmp/their_lib.so', 'wb').write(lib)
         so_patch.apply_patch_auto('/tmp/their_lib.so', out_path)
-    # second pass: OBB-from-APK fallback (reads assets/obb via <obb>.ref)
-    import so_patch_obb
-    so_patch_obb.apply(out_path, out_path)
-    shutil.copyfile(out_path, 'patched_arm64.so')  # keep cached patch current
+    # optional second pass: OBB-from-APK fallback (experimental, see so_patch_obb)
+    # TWP_EXTRACTION=1 builds the self-extracting variant instead (wrapper dex
+    # copies assets/obb out on first launch; native patch not needed).
+    if os.environ.get('TWP_EXTRACTION') != '1':
+        import so_patch_obb
+        so_patch_obb.apply(out_path, out_path,
+                           pristine_path='apk_extracted/lib/arm64-v8a/libThimbleweedPark.so')
+        shutil.copyfile(out_path, 'patched_arm64.so')  # keep cached patch current
 
 
 def repack_apk(apk_path, patched_lib_path, obb_path, out_apk):

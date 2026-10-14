@@ -21,9 +21,14 @@ import capstone
 from unicorn import *
 from unicorn.arm64_const import *
 
-PLT = {'fopen': 0x152c50, 'fseek': 0x144350, 'stat': 0x142be0,
-       'fclose': 0x14e8f0, 'fgets': 0x143dd0}
-G = 0x6a7b30
+import so_patch_obb as _spo
+_stubs = _spo.find_plt_stubs('/tmp/engine_step2.so',
+                             _spo.find_got_addrs('/tmp/engine_step2.so',
+                                                 {'fopen', 'fseek', 'stat', 'fclose', 'fgets', 'open', 'write', 'close'}))
+PLT = {'fopen': _stubs['fopen'], 'fseek': _stubs['fseek'], 'stat': _stubs['stat'],
+       'fclose': _stubs['fclose'], 'fgets': _stubs['fgets'],
+       'open': _stubs['open'], 'write': _stubs['write'], 'close': _stubs['close']}
+G = _spo.rw_globals_base(open('/tmp/engine_step2.so', 'rb').read())
 CAVE = 0x1df1c4
 
 LIB = sys.argv[1] if len(sys.argv) > 1 else '/tmp/engine_step2.so'
@@ -114,6 +119,12 @@ def make_uc(fake):
         elif name == 'stat':
             path = bytes(uc.mem_read(x0, 300)).split(b'\0')[0].decode()
             uc.reg_write(UC_ARM64_REG_X0, fake.stat(path, x1) & 0xFFFFFFFFFFFFFFFF)
+        elif name == 'open':
+            uc.reg_write(UC_ARM64_REG_X0, 0)   # trace file not emulated
+        elif name == 'write':
+            uc.reg_write(UC_ARM64_REG_X0, x2)
+        elif name == 'close':
+            uc.reg_write(UC_ARM64_REG_X0, 0)
         uc.reg_write(UC_ARM64_REG_PC, lr)
 
     uc.hook_add(UC_HOOK_CODE, hook_plt, begin=0x1408c0, end=0x1408c0 + 0x16160)
@@ -125,9 +136,19 @@ def make_uc(fake):
         seen.clear()
         for i, v in enumerate(args):
             uc.reg_write(UC_ARM64_REG_X0 + i, v)
+        # callee-saved canaries: thunks must preserve x19-x28
+        for i, r in enumerate((UC_ARM64_REG_X19, UC_ARM64_REG_X20, UC_ARM64_REG_X21, UC_ARM64_REG_X22,
+                               UC_ARM64_REG_X23, UC_ARM64_REG_X24, UC_ARM64_REG_X25, UC_ARM64_REG_X26,
+                               UC_ARM64_REG_X27, UC_ARM64_REG_X28)):
+            uc.reg_write(r, 0xC0FFEE0000000000 + i)
         uc.reg_write(UC_ARM64_REG_SP, STACK + 0x80000)
         uc.reg_write(UC_ARM64_REG_LR, MAGIC_RET)
         uc.emu_start(addr, MAGIC_RET)
+        for i, r in enumerate((UC_ARM64_REG_X19, UC_ARM64_REG_X20, UC_ARM64_REG_X21, UC_ARM64_REG_X22,
+                               UC_ARM64_REG_X23, UC_ARM64_REG_X24, UC_ARM64_REG_X25, UC_ARM64_REG_X26,
+                               UC_ARM64_REG_X27, UC_ARM64_REG_X28)):
+            v = uc.reg_read(r)
+            assert v == 0xC0FFEE0000000000 + i, f'callee-saved x{19+i} clobbered: {v:#x}'
         if os.environ.get('TWP_TRACE'):
             print('  pcs:', [hex(p) for p in seen[:40]])
 
@@ -148,11 +169,20 @@ def run():
     uc.mem_write(SCRATCH, refpath)
     call(thunks['fopen'], [SCRATCH, 0])
     x0 = uc.reg_read(UC_ARM64_REG_X0)
+    print('  fake.log:', fake.log)
+    print('  x0:', hex(x0), 'globals:',
+          hex(struct.unpack('<Q', uc.mem_read(G + 8, 8))[0]),
+          hex(struct.unpack('<Q', uc.mem_read(G + 0x10, 8))[0]),
+          hex(struct.unpack('<Q', uc.mem_read(G + 0x18, 8))[0]))
     assert x0 == 0x104, f'fopen fallback returned {x0:#x}'
     off = struct.unpack('<Q', uc.mem_read(G + 8, 8))[0]
     size = struct.unpack('<Q', uc.mem_read(G + 0x10, 8))[0]
     apkf = struct.unpack('<Q', uc.mem_read(G + 0x18, 8))[0]
     assert (off, size, apkf) == (4096, 12345678, 0x104), (off, size, apkf)
+    print('  fake.log:', fake.log)
+    print('  globals:', hex(struct.unpack('<Q', uc.mem_read(G + 8, 8))[0]),
+          hex(struct.unpack('<Q', uc.mem_read(G + 0x10, 8))[0]),
+          hex(struct.unpack('<Q', uc.mem_read(G + 0x18, 8))[0]))
     seeks = [e for e in fake.log if e[0] == 'fseek']
     assert ('fseek', '/data/app/base.apk', 4096, 0) in seeks, seeks
     ok.append('hook_fopen fallback + config parse + initial seek')

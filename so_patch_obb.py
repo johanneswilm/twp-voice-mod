@@ -208,32 +208,28 @@ def find_plt_stubs(lib_path, got_addrs):
 
 
 def find_bl_sites(lib_path, target):
+    """Strict linear scan - only sites on clean instruction boundaries in the
+    PRISTINE library. The resync variant can misdecode mid-instruction bytes as
+    bl and patching those corrupts real code (caused a native crash)."""
     import capstone
     data = open(lib_path, 'rb').read()
     secs = {s['sname']: s for s in derive_secs(lib_path)}
     text = secs['.text']
     md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_LITTLE_ENDIAN)
     sites = []
-    pos = 0
-    end = text['size']
-    while pos < end:
-        reached = pos
-        for ins in md.disasm(data[text['offset'] + pos:text['offset'] + end],
-                             text['addr'] + pos):
-            reached = ins.address - text['addr'] + ins.size
-            if ins.mnemonic == 'bl':
-                try:
-                    if int(ins.op_str.lstrip('#'), 16) == target:
-                        sites.append(ins.address)
-                except ValueError:
-                    pass
-        # linear sweep stalled (e.g. embedded data) - resync 4 bytes past it
-        pos = reached + 4 if reached <= pos else reached
+    for ins in md.disasm(data[text['offset']:text['offset'] + text['size']], text['addr']):
+        if ins.mnemonic == 'bl':
+            try:
+                if int(ins.op_str.lstrip('#'), 16) == target:
+                    sites.append(ins.address)
+            except ValueError:
+                pass
     return sites
 
 
 def rw_globals_base(data):
-    """32 writable bytes in the zero padding after .bss in the RW LOAD segment."""
+    """Writable bytes in the zero padding after .bss (RW LOAD segment end):
+    32 bytes of flags/values + 160 bytes for the trace file path."""
     e_phoff = struct.unpack_from('<Q', data, 0x20)[0]
     e_phentsize, e_phnum = struct.unpack_from('<HH', data, 0x36)
     for i in range(e_phnum):
@@ -242,7 +238,7 @@ def rw_globals_base(data):
         if p_type == 1 and p_flags & 2:  # PT_LOAD, PF_W
             p_vaddr = struct.unpack_from('<Q', data, o + 0x10)[0]
             p_memsz = struct.unpack_from('<Q', data, o + 0x28)[0]
-            return (p_vaddr + p_memsz - 32) & ~7
+            return (p_vaddr + p_memsz - 192) & ~7
     raise SystemExit('no writable LOAD segment')
 
 
@@ -303,10 +299,22 @@ class Asm:
         return b''.join(struct.pack('<I', w) for w in self.ins)
 
 
+PASSTHROUGH = __import__('os').environ.get('TWP_PASSTHROUGH') == '1'
+
+
 def _build(cave_addr, plt, g, str_rb):
     """str_rb: (addr) of the const "rb" string placed right after the code."""
     a = Asm(cave_addr)
     E = a.emit
+    if PASSTHROUGH:
+        # bisect build: thunks that only tail-call the real function
+        for name in ('fopen', 'fseek', 'stat', 'fclose'):
+            a.lbl('pt_' + name)
+            E(bl(plt[name], a.pc()))
+            E(RET)
+        a.resolve()
+        thunks = {k: a.labels['pt_' + k] for k in ('fopen', 'fseek', 'stat', 'fclose')}
+        return a.blob(), thunks
 
     # ---- local_strlen(x0) -> x1
     a.lbl('strlen')
@@ -327,6 +335,7 @@ def _build(cave_addr, plt, g, str_rb):
     E(strb_imm(W8, X0, 0), add_imm(X0, X0, 1), add_imm(X1, X1, 1))
     a.br('copy_loop')
     a.lbl('copy_done')
+    E(strb_imm(XZR, X0, 0))                      # NUL-terminate
     E(RET)
 
     # ---- strip_nl(x0)
@@ -355,6 +364,32 @@ def _build(cave_addr, plt, g, str_rb):
     a.lbl('pdec_done')
     E(mov_reg(X0, X1), RET)
 
+    # ---- trace_msg(w0=c1, w1=c2): append two chars + newline to <obb>.trace
+    a.lbl('trace')
+    E(stp_pre(X29, X30, SP, -48), stp_off(X19, X20, SP, 16))
+    E(sub_imm64(SP, SP, 16))
+    E(strb_imm(W0, SP, 0), strb_imm(W1, SP, 1))
+    E(movz(W8, 0x0a))
+    E(strb_imm(W8, SP, 2))
+    E(add_imm64(X0, SP, 0), add_imm64(X1, SP, 0))  # placeholder; x0 set below
+    a.lbl('trace_open')
+    E(adrp(X0, a.pc(), g + 0x20), add_imm(X0, X0, (g + 0x20) & 0xFFF))
+    E(movz(W1, 0x441))                             # O_WRONLY|O_APPEND|O_CREAT
+    E(movz(W2, 0x1a4))                             # 0644
+    E(bl(plt['open'], a.pc()))
+    a.jcbz(X0, 'trace_done')
+    E(mov_reg(X20, X0))
+    E(mov_reg(X0, X20))
+    E(add_imm64(X1, SP, 0))                      # X1 = SP (buffer)
+    E(movz(W2, 3))
+    E(bl(plt['write'], a.pc()))
+    E(mov_reg(X0, X20))
+    E(bl(plt['close'], a.pc()))
+    a.lbl('trace_done')
+    E(add_imm64(SP, SP, 16))
+    E(ldp_off(X19, X20, SP, 16))
+    E(ldp_post(X29, X30, SP, 48), RET)
+
     # ---- hook_fclose(x0)
     a.lbl('fclose')
     E(stp_pre(X29, X30, SP, -48), stp_off(X19, X20, SP, 16))
@@ -365,14 +400,17 @@ def _build(cave_addr, plt, g, str_rb):
     E(cmp_reg(X0, X8))
     a.bc(NE, 'fc_do')
     E(adrp(X9, a.pc(), g + 0x18), str_imm(XZR, X9, (g + 0x18) & 0xFFF))
+    E(movz(W0, 0x43), movz(W1, 0x2b))            # "C+"
+    a.call('trace')
     a.lbl('fc_do')
     E(mov_reg(X0, X19))
     E(bl(plt['fclose'], a.pc()))
+    E(ldp_off(X19, X20, SP, 16))
     E(ldp_post(X29, X30, SP, 48), RET)
 
     # ---- hook_fseek(x0=f, x1=off, w2=whence)
     a.lbl('fseek')
-    E(stp_pre(X29, X30, SP, -48), stp_off(X19, X20, SP, 16))
+    E(stp_pre(X29, X30, SP, -48), stp_off(X19, X20, SP, 16), stp_off(X21, X22, SP, 32))
     E(mov_reg(X19, X0), mov_reg(X20, X1), mov_reg(X21, X2))
     E(adrp(X8, a.pc(), g + 0x18))
     E(ldr_imm(X8, X8, (g + 0x18) & 0xFFF))
@@ -391,14 +429,19 @@ def _build(cave_addr, plt, g, str_rb):
     E(adrp(X9, a.pc(), g + 0x10), ldr_imm(X9, X9, (g + 0x10) & 0xFFF))
     E(add_reg(X20, X8, X9))
     E(movz(W21, 0))                              # absolute -> SEEK_SET
+    a.jcbz(X8, 'fs_trace')                       # x8 = g_apk_file (nonzero here)
+    E(movz(W0, 0x53), add_imm(W1, W21, 0x30))    # "S<whence>"
+    a.call('trace')
+    a.lbl('fs_trace')
     a.lbl('fs_plain')
     E(mov_reg(X0, X19), mov_reg(X1, X20), mov_reg(W2, W21))
     E(bl(plt['fseek'], a.pc()))
+    E(ldp_off(X21, X22, SP, 32), ldp_off(X19, X20, SP, 16))
     E(ldp_post(X29, X30, SP, 48), RET)
 
     # ---- hook_stat(x0=path, x1=buf)
     a.lbl('stat')
-    E(stp_pre(X29, X30, SP, -48), stp_off(X19, X20, SP, 16))
+    E(stp_pre(X29, X30, SP, -48), stp_off(X19, X20, SP, 16), stp_off(X21, X22, SP, 32))
     E(mov_reg(X19, X0), mov_reg(X20, X1))
     E(bl(plt['stat'], a.pc()))
     a.jcbz(W0, 'st_out')              # stat succeeded -> pass through
@@ -413,57 +456,75 @@ def _build(cave_addr, plt, g, str_rb):
     a.jcbnz(W10, 'st_zero')
     E(adrp(X8, a.pc(), g + 0x10), ldr_imm(X8, X8, (g + 0x10) & 0xFFF))
     E(str_imm(X8, X20, 40), str_imm(X8, X20, 48))
+    E(movz(W0, 0x41), movz(W1, 0x2b))            # "A+"
+    a.call('trace')
     E(movz(W0, 0))
     a.lbl('st_out')
+    E(ldp_off(X21, X22, SP, 32), ldp_off(X19, X20, SP, 16))
     E(ldp_post(X29, X30, SP, 48), RET)
 
     # ---- load_config_full(path) -> FILE* or NULL
     # stack: fp/lr at [sp+0x400], x19/x20 at +0x410, x21/x22 at +0x420,
-    # buffers below: +0x000 l1[260], +0x104 l2[64], +0x144 l3[64], +0x190 refpath[260]
+    # buffers below: +0x200 l1[260], +0x304 l2[64], +0x344 l3[64], +0x384 refpath[260]
     a.lbl('loadcfg')
     E(stp_pre(X29, X30, SP, -16))
-    E(sub_imm64(SP, SP, 0x430))
-    E(stp_off(X19, X20, SP, 0x400), stp_off(X21, X22, SP, 0x410))
+    E(sub_imm64(SP, SP, 0x490))
+    E(stp_off(X19, X20, SP, 0x1E0), stp_off(X21, X22, SP, 0x1F0))
     E(mov_reg(X19, X0))                          # path
     E(movz(W21, 0))                              # result = NULL
-    # refpath = path + ".ref"
+
+    # x22 = strlen(path)
     E(mov_reg(X0, X19))
     a.call('strlen')
-    E(mov_reg(X22, X1))                          # len
-    E(add_imm(X0, SP, 0x190))                    # dst
-    E(mov_reg(X1, X19))                          # src
+    E(mov_reg(X22, X1))
+
+    # refpath (sp+0x384) = path + ".ref"
+    E(add_imm(X0, SP, 0x384))
+    E(mov_reg(X1, X19))
     a.call('copy')
-    E(add_imm(X8, SP, 0x190))                    # refpath
-    E(add_reg(X8, X8, X22))                      # + len
+    E(add_imm(X8, SP, 0x384))
+    E(add_reg(X8, X8, X22))
     E(movz(W9, 0x722E), movk(W9, 0x6665, 1))     # ".ref"
     E(str_w_imm(W9, X8, 0))
     E(add_imm(X8, X8, 4), strb_imm(XZR, X8, 0))
-    # fopen(refpath, "rb")
-    E(add_imm(X0, SP, 0x190))
+
+    # cf = fopen(refpath, "rb")
+    E(add_imm(X0, SP, 0x384))
     E(adrp(X1, a.pc(), str_rb))
     E(add_imm(X1, X1, str_rb & 0xFFF))
     E(bl(plt['fopen'], a.pc()))
     a.jcbz(X0, 'lc_done')
     E(mov_reg(X20, X0))                          # cf
-    E(add_imm(X0, SP, 0x000), movz(W1, 260), mov_reg(X2, X20))
+    E(add_imm(X0, SP, 0x200), movz(W1, 260), mov_reg(X2, X20))
     E(bl(plt['fgets'], a.pc()))
-    E(add_imm(X0, SP, 0x104), movz(W1, 64), mov_reg(X2, X20))
+    E(add_imm(X0, SP, 0x304), movz(W1, 64), mov_reg(X2, X20))
     E(bl(plt['fgets'], a.pc()))
-    E(add_imm(X0, SP, 0x144), movz(W1, 64), mov_reg(X2, X20))
+    E(add_imm(X0, SP, 0x344), movz(W1, 64), mov_reg(X2, X20))
     E(bl(plt['fgets'], a.pc()))
     E(mov_reg(X0, X20))
     E(bl(plt['fclose'], a.pc()))
-    E(add_imm(X0, SP, 0x000))                    # strip \n from apk path line
+    # tracepath (g+0x20) = path + ".trace"
+    E(adrp(X0, a.pc(), g + 0x20), add_imm(X0, X0, (g + 0x20) & 0xFFF))
+    E(mov_reg(X1, X19))
+    a.call('copy')
+    E(adrp(X0, a.pc(), g + 0x20), add_imm(X0, X0, (g + 0x20) & 0xFFF))
+    a.call('strlen')
+    E(adrp(X8, a.pc(), g + 0x20), add_imm(X8, X8, (g + 0x20) & 0xFFF))
+    E(add_reg(X8, X8, X1))
+    E(movz(W9, 0x742e), movk(W9, 0x6172, 1))     # ".tra"
+    E(str_w_imm(W9, X8, 0))
+    E(movz(W9, 0x6563), str_w_imm(W9, X8, 4))    # "ce\0\0"
+    E(add_imm(X0, SP, 0x200))                    # strip \n from apk path line
     a.call('stripnl')
     # g_offset = parse_dec(l2); g_size = parse_dec(l3)
-    E(add_imm(X0, SP, 0x104))
+    E(add_imm(X0, SP, 0x304))
     a.call('pdec')
     E(adrp(X8, a.pc(), g + 0x08), str_imm(X0, X8, (g + 0x08) & 0xFFF))
-    E(add_imm(X0, SP, 0x144))
+    E(add_imm(X0, SP, 0x344))
     a.call('pdec')
     E(adrp(X8, a.pc(), g + 0x10), str_imm(X0, X8, (g + 0x10) & 0xFFF))
     # open the apk and seek to the embedded pack
-    E(add_imm(X0, SP, 0x000))                    # l1 = apk path
+    E(add_imm(X0, SP, 0x200))                    # l1 = apk path
     E(adrp(X1, a.pc(), str_rb))
     E(add_imm(X1, X1, str_rb & 0xFFF))
     E(bl(plt['fopen'], a.pc()))
@@ -473,12 +534,12 @@ def _build(cave_addr, plt, g, str_rb):
     E(mov_reg(X0, X21), movz(W2, 0))             # fseek(f, offset, SEEK_SET)
     E(bl(plt['fseek'], a.pc()))
     E(adrp(X8, a.pc(), g + 0x18))
-    E(str_imm(X21, X8, (g + 0x18) & 0xFFF))                    # g_apk_file = f
+    E(str_imm(X21, X8, (g + 0x18) & 0xFFF))      # g_apk_file = f
     E(movz(W9, 1), str_w_imm(W9, X8, 0x00))      # flags = 1
     E(mov_reg(W0, W21))
     a.lbl('lc_done')
-    E(ldp_off(X21, X22, SP, 0x410), ldp_off(X19, X20, SP, 0x400))
-    E(add_imm64(SP, SP, 0x430))
+    E(ldp_off(X19, X20, SP, 0x1E0), ldp_off(X21, X22, SP, 0x1F0))
+    E(add_imm64(SP, SP, 0x490))
     E(ldp_post(X29, X30, SP, 16), RET)
 
     # ---- hook_fopen(x0=path, x1=mode)
@@ -487,9 +548,23 @@ def _build(cave_addr, plt, g, str_rb):
     E(mov_reg(X19, X0))
     E(bl(plt['fopen'], a.pc()))
     a.jcbnz(X0, 'fo_out')
+    E(movz(W0, 0x46), movz(W1, 0x3f))            # "F?"
+    a.call('trace')
     E(mov_reg(X0, X19))
     a.call('loadcfg')                            # -> FILE* or NULL in x0
+    E(mov_reg(X9, X0))                           # save result (trace clobbers x0)
+    a.jcbz(X9, 'fo_fail')
+    E(movz(W0, 0x46), movz(W1, 0x2b))            # "F+"
+    a.call('trace')
+    E(mov_reg(X0, X9))
     a.lbl('fo_out')
+    E(ldp_off(X19, X20, SP, 16))
+    E(ldp_post(X29, X30, SP, 48), RET)
+    a.lbl('fo_fail')
+    E(movz(W0, 0x46), movz(W1, 0x2d))            # "F-"
+    a.call('trace')
+    E(ldp_off(X19, X20, SP, 16))
+    E(ldp_post(X29, X30, SP, 48), RET)
     E(ldp_off(X19, X20, SP, 16))
     E(ldp_post(X29, X30, SP, 48), RET)
 
@@ -509,10 +584,12 @@ def assemble_cave(cave_addr, plt, g):
     return code, thunks, b'rb\0'
 
 
-def apply(lib_path, out_path, verbose=True):
+def apply(lib_path, out_path, pristine_path=None, verbose=True):
     data = open(lib_path, 'rb').read()
     buf = bytearray(data)
-    got = find_got_addrs(lib_path, {'fopen', 'fseek', 'stat', 'fclose', 'fgets'})
+    if pristine_path is None:
+        pristine_path = lib_path
+    got = find_got_addrs(lib_path, {'fopen', 'fseek', 'stat', 'fclose', 'fgets', 'open', 'write', 'close'})
     missing = {'fopen', 'fseek', 'stat', 'fclose', 'fgets'} - set(got)
     assert not missing, f'missing imports: {missing}'
     plt = find_plt_stubs(lib_path, got)
@@ -530,7 +607,15 @@ def apply(lib_path, out_path, verbose=True):
             merged[-1][2] += n
         else:
             merged.append([addr, off, n])
-    cave_addr, cave_off, cave_len = max(merged, key=lambda r: r[2])
+    # Use the FIRST run (the remainder of the run the sayline patch already
+    # uses) - it is proven unused at runtime. The largest mid-.text zero runs
+    # are engine data tables; overwriting them corrupts the engine at runtime.
+    cave_addr, cave_off, cave_len = merged[0]
+    if cave_len < 1200:
+        for r in merged:
+            if r[2] >= 1200:
+                cave_addr, cave_off, cave_len = r
+                break
     if cave_addr % 4:                      # arm64 code must be 4-byte aligned
         pad = 4 - cave_addr % 4
         cave_addr += pad
@@ -545,7 +630,7 @@ def apply(lib_path, out_path, verbose=True):
     buf[cave_off + len(code):cave_off + len(code) + len(strbytes)] = strbytes
 
     for name in ('fopen', 'fseek', 'stat', 'fclose'):
-        sites = find_bl_sites(lib_path, plt[name])
+        sites = find_bl_sites(pristine_path, plt[name])
         assert sites, f'no call sites for {name}'
         for site in sites:
             o = so_patch._addr2off(secs, site)
