@@ -54,10 +54,14 @@ def patch_lib(apk_path, out_path):
     if lib == known:
         shutil.copyfile('patched_arm64.so', out_path)
         print('lib matches known 1.0.10 build -> reused validated patch')
-        return
-    print('lib differs from known build -> auto-patching this build')
-    open('/tmp/their_lib.so', 'wb').write(lib)
-    so_patch.apply_patch_auto('/tmp/their_lib.so', out_path)
+    else:
+        print('lib differs from known build -> auto-patching this build')
+        open('/tmp/their_lib.so', 'wb').write(lib)
+        so_patch.apply_patch_auto('/tmp/their_lib.so', out_path)
+    # second pass: OBB-from-APK fallback (reads assets/obb via <obb>.ref)
+    import so_patch_obb
+    so_patch_obb.apply(out_path, out_path)
+    shutil.copyfile(out_path, 'patched_arm64.so')  # keep cached patch current
 
 
 def repack_apk(apk_path, patched_lib_path, obb_path, out_apk):
