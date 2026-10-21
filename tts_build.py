@@ -24,6 +24,7 @@ import wave
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ggpack3 import GGPack
+from tts_text import clean_text
 
 OBB = 'main.65.com.terribletoybox.thimbleweedparkandroid.obb'
 OUT_DIR = 'tts_out'
@@ -32,20 +33,6 @@ ASSIGN = None  # loaded per worker from cache/voice_assign.json
 TAG_RE = re.compile(r'\{[^}]*\}')
 STAR_RE = re.compile(r'\*[^*]*\*')
 OGG_RE = re.compile(r'^([A-Z0-9]+)_(\d{5})\.ogg$')
-
-
-def clean_text(t):
-    t = TAG_RE.sub(' ', t)
-    t = STAR_RE.sub(' ', t)
-    # trademark/copyright glyphs glued to product names - piper reads them
-    # aloud ("Markenzeichen"); remove instead of spacing
-    t = re.sub(r'[™©®]', '', t)
-    t = t.replace('\n', ' ').replace('\r', ' ')
-    t = re.sub(r'\s+', ' ', t).strip()
-    # drop strings that are pure punctuation
-    if not re.search(r'\w', t):
-        return ''
-    return t
 
 
 def ffmpeg(args):
@@ -234,7 +221,7 @@ def build_manifest():
             lip_name = None
         eng_names.append(name)
         for lang in ('de', 'es'):
-            text = clean_text(texts[lang].get(oid, ''))
+            text = clean_text(texts[lang].get(oid, ''), lang)
             jobs.append((actor, oid, lang, text, name, lip_name))
     return pack, jobs, eng_names
 
@@ -314,6 +301,31 @@ def main():
     from collections import Counter
     stat = Counter('ok' if v.startswith(('ok', 'fallback')) else v for v in results.values())
     print(stat)
+    update_text_manifest(jobs, results)
+
+
+def update_text_manifest(jobs, results):
+    """Remember which text every generated clip was made from.
+
+    tts_fix_changed.py compares this with the current text rules, so that
+    only the clips whose text really changed are re-rolled.
+    """
+    import json as _json
+    os.makedirs('cache', exist_ok=True)
+    manifests = {}
+    for lang in ('de', 'es'):
+        path = f'cache/built_text_{lang}.json'
+        manifests[lang] = _json.load(open(path)) if os.path.exists(path) else {}
+    for actor, oid, lang, text, en, lip in jobs:
+        if (actor, oid, lang) not in results:
+            continue                                   # was not generated now
+        ogg = os.path.join(OUT_DIR, lang, f'{actor.lower()}_{int(oid):05d}_{lang}.ogg')
+        if os.path.exists(ogg):
+            manifests[lang][oid] = text
+    for lang, m in manifests.items():
+        with open(f'cache/built_text_{lang}.json', 'w') as fh:
+            _json.dump(m, fh, ensure_ascii=False, sort_keys=True)
+        print(f'wrote cache/built_text_{lang}.json ({len(m)} entries)')
 
 
 if __name__ == '__main__':

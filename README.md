@@ -9,9 +9,11 @@ female voices — determined automatically from the pitch of the original
 English recordings).
 
 > **What this repository contains:** only the tooling. It does **not** contain
-> any game data (GGPack/OBB/APK), the game's copyrighted text, or the
-> generated audio. You must own the game; running the pipeline produces the
-> voice files locally from your own copy.
+> any game data (GGPack/OBB/APK), the game's text files, or the generated
+> audio. You must own the game; running the pipeline produces the voice
+> files locally from your own copy. The one exception is a small word list
+> (`tts_censored.py`) that maps the game's censored word to a milder word
+> per language — it is needed to reproduce the fix described below.
 
 ## How it works
 
@@ -41,12 +43,48 @@ This toolkit:
    pitch/speed variants, so you can hear *who* is speaking.
 4. **Synthesizes all lines** (`tts_build.py`): reads each language's shipped
    subtitle table (`ThimbleweedText_de.tsv` / `_es.tsv`) from your own OBB,
-   strips stage directions, synthesizes with the assigned voice, matches
-   loudness to the English original, and derives lip-sync by scaling the
-   English timings.
+   cleans the text up (`tts_text.py`), synthesizes with the assigned voice,
+   matches loudness to the English original, and derives lip-sync by scaling
+   the English timings.
 5. **Repacks** (`ggpack_write.py`, `build_mod.py`, `repack.py`): appends the
-   new audio to a copy of your OBB (originals untouched), patches the APK's
+   new audio to a copy of your OBB (originals untouched), replaces the
+   German/Spanish subtitle tables with the cleaned-up text, patches the APK's
    engine library, and signs the result.
+
+## The text pipeline (`tts_text.py`, `tts_censored.py`)
+
+The localisation tables are **not** what the game shows and **not** what the
+voice should say — the engine rewrites them on the way in (verified in
+`libThimbleweedPark.so`):
+
+* `Text::loadLanguageTable` drops every backslash while loading the TSV, so
+  `\"` is printed as `"` (and `\n` as `n`).
+* `Obtor::parseSayLine` consumes a leading `(...)` delivery direction and a
+  leading `{...}` engine command — neither is shown nor spoken.
+
+Feeding the raw TSV string to the synthesizer therefore made the voices read
+things the player never sees: the backslash of `\"` came out as "Wechsel"
+(the German word for backslash), and the delivery direction `(sarcastic)` was
+read out loud. `tts_text.clean_text()` undoes both, and additionally
+
+* keeps the censored word instead of deleting it — the English game hides
+  "fuck" behind a beep (`*beep*`, `*beeping*`, `*beepface*`, *Beepoff* …) and
+  the German/Spanish translations replaced it with "Biep"/"biip". That is a
+  US convention, so `tts_censored.py` maps every masked word to a milder
+  word with the same meaning (*Biep* → "Scheiß", *verBiep*te* → "verdammte",
+  *Biep*loch* → "Muschi", *biip* → "mierda", *gilibiips* → "gilipollas" …).
+  The same mapping is applied to the subtitle table, so the subtitle and the
+  voice now say the same thing.
+* drops the trailing `#F`/`#M` marker of the translation files.
+
+`python3 tts_text_audit.py` writes a spreadsheet (`text_audit_de_es.xlsx`,
+openable in LibreOffice Calc) that lists, for every text id, the text as
+printed in the game vs. the text as spoken by the voice, with the issues
+found and their state — plus the full table of the censored-word mapping.
+
+`cache/built_text_<lang>.json` remembers the text every generated clip was
+made from; `python3 tts_fix_changed.py` deletes only the clips whose text
+really changed, so a rule change does not re-roll the whole language.
 
 ## Requirements
 
@@ -71,6 +109,9 @@ python3 assign_voices.py           # writes cache/voice_assign.json
 
 # 3. synthesize ~30k clips (German + Spanish), ~1-2 h on 20 cores
 python3 tts_build.py 0 20
+
+# 3b. (optional) check the printed vs. spoken text, spreadsheet for review
+python3 tts_text_audit.py            # writes text_audit_de_es.xlsx
 
 # 4. build modded OBB + APK, sign, install, push OBB
 python3 build_mod.py phone_backup_*/base.apk \

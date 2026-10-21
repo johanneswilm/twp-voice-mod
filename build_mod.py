@@ -108,6 +108,28 @@ def repack_apk(apk_path, patched_lib_path, obb_path, out_apk):
             os.unlink(p)
 
 
+def modded_tsv(pack, lang):
+    """The localisation file with the censored word replaced by a mild word.
+
+    The game shows this file, so the subtitle says the same thing the
+    voice says ("verdammte Sonne" instead of "ver*Biep*te Sonne").
+    """
+    from tts_censored import subtitle_text
+    data = pack.read(f'ThimbleweedText_{lang}.tsv').decode('utf-8')
+    out = []
+    changed = 0
+    for line in data.split('\n'):
+        if '\t' in line:
+            tid, text = line.split('\t', 1)
+            new = subtitle_text(text, lang)
+            if new != text:
+                changed += 1
+            line = f'{tid}\t{new}'
+        out.append(line)
+    print(f'  ThimbleweedText_{lang}.tsv: {changed} lines changed')
+    return '\n'.join(out).encode('utf-8')
+
+
 def append_lang_files(obb_in, obb_out):
     pack = GGPack(obb_in)
     existing = {k.lower() for k in pack.entries}
@@ -126,6 +148,14 @@ def append_lang_files(obb_in, obb_out):
                 w.add_entry(name, fh.read())
             added += 1
     print(f'appending {added} lang entries to {obb_in}')
+    # the localisation files: same name, new content (the subtitle now says
+    # the mild word instead of the beep)
+    os.makedirs('text_mod', exist_ok=True)
+    for lang in ('de', 'es'):
+        data = modded_tsv(pack, lang)
+        w.replace_entry(f'ThimbleweedText_{lang}.tsv', data)
+        with open(f'text_mod/ThimbleweedText_{lang}.tsv', 'wb') as fh:
+            fh.write(data)
     w.write(obb_out)
     pk = GGPack(obb_out)
     print('modded obb entries:', len(pk.entries))

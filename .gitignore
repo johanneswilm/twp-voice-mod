@@ -12,3 +12,7 @@ tts_out*/
 *.log
 *.keystore
 tmp/
+
+# the audit output and the modified localisation files contain game text
+text_audit_*
+text_mod/

@@ -11,6 +11,8 @@ import multiprocessing as mp
 import numpy as np
 import difflib
 
+from tts_text import clean_text
+
 def norm(s):
     s = s.lower()
     s = re.sub(r'[^a-zäöüßñáéíóúü¿¡ ]', ' ', s)
@@ -20,7 +22,8 @@ def sim(a, b):
     if not a or not b: return 0.0
     return difflib.SequenceMatcher(None, a, b).ratio()
 
-def clean_text(t):
+def legacy_clean_text(t):
+    """kept for reference - the pipeline used this before the 2026-10-21 fix"""
     t = re.sub(r'\{[^}]*\}', ' ', t)
     t = re.sub(r'\*[^*]*\*', ' ', t)
     t = t.replace('\\', ' ').replace('"', ' ').replace('\n', ' ')
@@ -74,7 +77,7 @@ def main():
     for f in os.listdir(f'tts_out/{lang}'):
         m = pat.match(f)
         if not m: continue
-        src = norm(clean_text(texts.get(m.group(2), '')))
+        src = norm(clean_text(texts.get(m.group(2), ''), lang))
         if not src: continue
         items.append((f'tts_out/{lang}/{f}', src))
     chunks = [items[i:i+50] for i in range(0, len(items), 50)]

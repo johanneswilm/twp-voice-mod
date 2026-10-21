@@ -137,6 +137,7 @@ class GGPackWriter:
         self.root = p.dict(r)
         self.data_end = self.entries_offset  # data occupies [8, entries_offset)
         self.pending = []
+        self.replacements = {}
 
     def _read_at(self, off, size):
         self.f.seek(off)
@@ -144,6 +145,10 @@ class GGPackWriter:
 
     def add_entry(self, filename: str, data: bytes):
         self.pending.append((filename, data))
+
+    def replace_entry(self, filename: str, data: bytes):
+        """Replace the content of an existing entry (same name, new data)."""
+        self.replacements[filename] = data
 
     def write(self, out_path: str):
         files = list(self.root["files"])
@@ -154,11 +159,30 @@ class GGPackWriter:
         table_size = len(self.table)
         for _ in range(8):
             data_start = self.entries_offset + table_size
-            newfiles = list(files)
-            cursor = data_start
+            newfiles = []
+            slots = []          # None = keep the original data, else index
+            appended = []       # the data blobs that go after the table
+            for e in files:
+                fn = e['filename']
+                if fn in self.replacements:
+                    slots.append(len(appended))
+                    appended.append(self.replacements[fn])
+                    newfiles.append({'filename': fn, 'offset': 0, 'size': 0})
+                else:
+                    slots.append(None)
+                    newfiles.append(e)
             for (name, data) in self.pending:
-                newfiles.append({"filename": name, "offset": cursor, "size": len(data)})
-                cursor += len(data)
+                slots.append(len(appended))
+                appended.append(data)
+                newfiles.append({'filename': name, 'offset': 0, 'size': 0})
+            cursor = data_start
+            for j, slot in enumerate(slots):
+                if slot is None:
+                    continue
+                blob = appended[slot]
+                newfiles[j]['offset'] = cursor
+                newfiles[j]['size'] = len(blob)
+                cursor += len(blob)
             w = TableWriter()
             table = w.serialize({"files": newfiles})
             if len(table) == table_size:
@@ -176,8 +200,8 @@ class GGPackWriter:
                 out.write(chunk)
                 remaining -= len(chunk)
             out.write(xor_encrypt_fast(table))
-            for (name, data) in self.pending:
-                out.write(xor_encrypt_fast(data))
+            for blob in appended:
+                out.write(xor_encrypt_fast(blob))
             out.seek(0)
             out.write(struct.pack("<II", self.entries_offset, len(table)))
         return out_path
